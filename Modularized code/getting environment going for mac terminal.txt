@@ -1,0 +1,11 @@
+start by changing to the right directory
+(on m2 macbook: /Users/paulbrown/Desktop/Coding Projects/3-18 github clone/O365-project-new/Modularized code)
+
+python3 -m venv venv
+
+source venv/bin/activate
+
+pip install --upgrade pip
+
+pip install -r requirements.txt
+

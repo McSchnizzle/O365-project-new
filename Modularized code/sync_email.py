@@ -1,12 +1,17 @@
-import os, json, sqlite3, requests
+import os
+import json
+import sqlite3
+import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
 from config import TOKEN_CACHE_FILE, DELTA_LINK_FILE, GRAPH_DELTA_ENDPOINT, FUTURE_WINDOW_DAYS, SYNC_SCOPES, MAIL_SCOPES, SQLITE_DB_FILE
 from auth import get_token
 from database import init_db, upsert_event
 from utils import parse_iso_time, convert_to_pacific, get_event_start_dt, should_ignore_event
-from attendees import init_attendee_db, update_attendee_db, get_attendee_summary, get_series_master_attendees
+from attendees_db import init_attendee_db, update_attendees_with_event, get_attendee_summary, get_series_master_attendees
 
+# Global cache for series master subjects.
 series_master_cache = {}
 
 def get_series_master_subject(series_master_id):
@@ -32,6 +37,7 @@ def get_conflict_groups(events):
     current_group = []
     current_end = None
     for event in events:
+        # Exclude all-day events.
         if event.get("isAllDay", False):
             continue
         end_str = event.get("end", {}).get("dateTime")
@@ -58,7 +64,16 @@ def get_conflict_groups(events):
         groups.append(current_group)
     return groups
 
+def format_time(dt):
+    """Return dt formatted in 12‑hour time using the appropriate format for the OS."""
+    import os
+    if os.name != 'nt':
+        return dt.strftime("%-I:%M %p")
+    else:
+        return dt.strftime("%#I:%M %p")
+
 def sync_calendar():
+    # Initialize both databases.
     init_db()
     init_attendee_db()
     token = get_token(SYNC_SCOPES)
@@ -91,7 +106,7 @@ def sync_calendar():
             if should_ignore_event(event):
                 continue
             upsert_event(event)
-            update_attendee_db(event)
+            update_attendees_with_event(event)
         if "@odata.nextLink" in data:
             url = data["@odata.nextLink"]
         elif "@odata.deltaLink" in data:
@@ -132,14 +147,6 @@ def get_today_events():
                 filtered.append(event)
     filtered.sort(key=lambda e: e["_start_pacific"])
     return filtered
-
-def format_time(dt):
-    """Return dt formatted in 12‑hour time using the appropriate format for the OS."""
-    import os
-    if os.name != 'nt':
-        return dt.strftime("%-I:%M %p")
-    else:
-        return dt.strftime("%#I:%M %p")
 
 def build_html_email(events):
     # Compute overall attendee frequency.
@@ -205,7 +212,6 @@ def build_html_email(events):
             status_label = response_status
         
         attendees_list = event.get("attendees", [])
-        # For recurring events with no attendees, try master attendees.
         if not attendees_list and event.get("seriesMasterId"):
             attendees_list = get_series_master_attendees(event.get("seriesMasterId"))
         att_tuples = []
@@ -260,14 +266,18 @@ def build_html_email(events):
             html += f"<tr><td>{time_slot}</td><td>{meetings_details}</td></tr>"
         html += "</table>"
     
-    from attendees import get_attendee_summary
+    from attendees_db import get_attendee_summary
     attendee_summary = get_attendee_summary()
     if attendee_summary:
         html += "<h2>Attendee Summary</h2>"
         html += "<table border='1' cellspacing='0' cellpadding='5'>"
-        html += "<tr><th>Name</th><th>Email</th><th>Last Meeting</th><th>Next Meeting</th><th>Last Meeting Subject</th></tr>"
+        html += "<tr><th>Name</th><th>Email</th><th>First Meeting</th><th>Last Meeting</th><th>Next Meeting</th><th>Last Meeting Subject</th><th>Times Met</th><th>Ok To Ignore</th></tr>"
         for row in attendee_summary:
-            email, name, last_meeting, next_meeting, last_meeting_subject = row
+            email, name, first_meeting, last_meeting, next_meeting, last_meeting_subject, times_met, ok_to_ignore = row
+            try:
+                first_meeting_fmt = datetime.fromisoformat(first_meeting).astimezone(ZoneInfo("America/Los_Angeles")).strftime("%-m/%-d/%Y %-I:%M %p") if first_meeting else ""
+            except Exception:
+                first_meeting_fmt = first_meeting if first_meeting else ""
             try:
                 last_meeting_fmt = datetime.fromisoformat(last_meeting).astimezone(ZoneInfo("America/Los_Angeles")).strftime("%-m/%-d/%Y %-I:%M %p") if last_meeting else ""
             except Exception:
@@ -276,14 +286,14 @@ def build_html_email(events):
                 next_meeting_fmt = datetime.fromisoformat(next_meeting).astimezone(ZoneInfo("America/Los_Angeles")).strftime("%-m/%-d/%Y %-I:%M %p") if next_meeting else ""
             except Exception:
                 next_meeting_fmt = next_meeting if next_meeting else ""
-            html += f"<tr><td>{name}</td><td>{email}</td><td>{last_meeting_fmt}</td><td>{next_meeting_fmt}</td><td>{last_meeting_subject}</td></tr>"
+            html += f"<tr><td>{name}</td><td>{email}</td><td>{first_meeting_fmt}</td><td>{last_meeting_fmt}</td><td>{next_meeting_fmt}</td><td>{last_meeting_subject}</td><td>{times_met}</td><td>{ok_to_ignore}</td></tr>"
         html += "</table>"
     
-    # Build stale contacts list: 5 contacts not met in the longest time.
-    summary = get_attendee_summary()
+    from attendees_db import get_attendee_summary as summary_func
+    summary = summary_func()
     stale_list = []
     for row in summary:
-        email, name, last_meeting, next_meeting, last_meeting_subject = row
+        email, name, first_meeting, last_meeting, next_meeting, last_meeting_subject, times_met, ok_to_ignore = row
         if last_meeting:
             try:
                 dt = datetime.fromisoformat(last_meeting)
@@ -336,6 +346,22 @@ def main():
     print("Starting daily sync and email process...")
     sync_calendar()
     today_events = get_today_events()
+    
+    # Query calendar.db for the total number of events.
+    conn = sqlite3.connect(SQLITE_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM events")
+    total_events = cursor.fetchone()[0]
+    conn.close()
+    
+    # Get total attendee records.
+    from attendees_db import get_attendee_summary
+    attendee_summary = get_attendee_summary()
+    attendee_count = len(attendee_summary)
+    
+    # Print debug totals.
+    print(f"DEBUG: {total_events} events in calendar db, {attendee_count} attendees in attendee db")
+    
     print(f"Found {len(today_events)} event(s) for today.")
     html_content = build_html_email(today_events)
     send_email_via_graph(html_content)
