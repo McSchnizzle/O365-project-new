@@ -1,0 +1,60 @@
+Project Overview
+
+You are building a robust calendar sync and email generation application that integrates with Office 365 via Microsoft Graph. The application performs the following key functions:
+
+Calendar Sync: It retrieves events from the Office 365 calendar and stores them in a local SQLite database (calendar.db).
+Attendee Database: In parallel, it populates a separate SQLite database (attendees.db) with information about each attendee from the calendar events. For each attendee, the system tracks:
+Their email address (used as a unique key)
+Their name
+The date of their first meeting
+The date of their last meeting
+The date of their next scheduled meeting
+The subject of the last meeting
+The number of times you have met with them
+A flag indicating whether they are "ok to ignore"
+Email Generation: The application builds an HTML email that includes:
+A table of today's meetings (with properly formatted times in Pacific Time, correct handling of recurring events, and conflict detection).
+A table of meeting conflicts (i.e. overlapping events, excluding all‑day events), with accurate meeting names (including series master subjects when necessary).
+An attendee summary table that lists all attendee records.
+A "Stale Contacts List" that displays the five contacts you haven't met with in the longest time.
+Web Interface (Flask): Optionally, a local web server (using Flask) displays the same information as the email.
+Key Technical Requirements & Challenges
+
+Date and Time Standardization:
+
+All events must be converted and displayed in Pacific Time (America/Los_Angeles).
+The system must handle different date/time formats (e.g., ISO strings with trailing "Z", naive date-times, all-day events) robustly.
+Recurring Events Handling:
+
+For recurring events that lack attendee details or a subject, the system should query the master (series) event to fill in the missing data.
+Ensure that the attendee list for recurring events is populated correctly and that the correct subject appears in conflict tables.
+SSL Certificate Verification:
+
+The system connects to Microsoft Graph endpoints and must handle SSL certificate issues (e.g., self‑signed certificate errors). For development purposes, the system may bypass SSL verification (with appropriate warnings).
+Modularization:
+
+The project should be organized into clearly separated modules:
+config.py: Global settings and file paths.
+utils.py: Date/time parsing, conversion, and helper functions.
+database.py: Functions to initialize and update the calendar database.
+attendees_db.py: Functions to initialize and update the attendee database (with additional columns for first meeting, last meeting, next meeting, last meeting subject, times met, and ok to ignore).
+auth.py: Authentication via Microsoft Graph using MSAL.
+sync_email.py: The main sync process, email building (including conflict detection and stale contacts), and email sending via Graph.
+app.py: (Optional) Flask web interface to display the same HTML output.
+main.py: The entry point that may accept command-line parameters (e.g., “initialize” to delete databases and reset state).
+Testing Scenarios:
+
+Event Data Integrity: Verify that events are correctly imported into calendar.db and that all fields (subject, start time, end time, location, attendees) are stored as expected.
+Attendee Database Population: Test that for every event imported, the attendee database is updated correctly with the relevant columns. Confirm that duplicate attendees (by email) are not added, and that metrics (first meeting, last meeting, next meeting, times met) update appropriately.
+Time Zone Conversion: Create test events with different time zone formats (e.g., UTC with trailing Z, naive times) to ensure that conversion to Pacific Time works as expected on both Windows and macOS.
+Recurring Events: Test recurring events that may have missing data (e.g., missing attendees or subject) to ensure that the system properly retrieves data from the series master event.
+Conflict Detection: Generate overlapping events and verify that the conflict table correctly groups and displays these events, excluding all‑day events.
+SSL Verification Issues: Test the connectivity to Microsoft Graph endpoints, ensuring that SSL certificate verification is handled appropriately in your development environment (and note if SSL verification is disabled temporarily).
+Example Output:
+
+The email and webpage should display:
+A header with the total number of events and attendee records (as debug information printed to the console before the email is sent).
+A "Today's Meetings" table with columns for Time, Location, Subject, Status, and Attendees (excluding your own entry).
+A "Meeting Conflicts" table that lists overlapping meeting time slots along with meeting names and organizers.
+An "Attendee Summary" table with detailed attendee records.
+A "Stale Contacts List" table listing the 5 contacts with the oldest last meeting dates.
