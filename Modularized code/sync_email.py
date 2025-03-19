@@ -5,11 +5,10 @@ from config import TOKEN_CACHE_FILE, DELTA_LINK_FILE, GRAPH_DELTA_ENDPOINT, FUTU
 from auth import get_token
 from database import init_db, upsert_event
 from utils import parse_iso_time, convert_to_pacific, get_event_start_dt, should_ignore_event
+from attendees import init_attendee_db, update_attendee_db, get_attendee_summary, get_series_master_attendees
 
-# Global cache for series master subjects.
 series_master_cache = {}
 
-# -------------------- Series Master Queries --------------------
 def get_series_master_subject(series_master_id):
     global series_master_cache
     if series_master_id in series_master_cache:
@@ -28,30 +27,45 @@ def get_series_master_subject(series_master_id):
         series_master_cache[series_master_id] = ""
         return ""
 
-def get_series_master_attendees(series_master_id):
-    """
-    Query the Graph API for the master event's attendees.
-    """
-    token = get_token(SYNC_SCOPES)
-    headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://graph.microsoft.com/v1.0/me/events/{series_master_id}?$select=attendees"
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        data = response.json()
-        return data.get("attendees", [])
-    else:
-        print("Failed to fetch series master attendees", series_master_id, response.status_code, response.text)
-        return []
+def get_conflict_groups(events):
+    groups = []
+    current_group = []
+    current_end = None
+    for event in events:
+        if event.get("isAllDay", False):
+            continue
+        end_str = event.get("end", {}).get("dateTime")
+        if not end_str:
+            continue
+        try:
+            end_dt = parse_iso_time(end_str).astimezone(ZoneInfo("America/Los_Angeles"))
+        except Exception:
+            end_dt = event["_start_pacific"]
+        if not current_group:
+            current_group = [event]
+            current_end = end_dt
+        else:
+            if event["_start_pacific"] < current_end:
+                current_group.append(event)
+                if end_dt > current_end:
+                    current_end = end_dt
+            else:
+                if len(current_group) > 1:
+                    groups.append(current_group)
+                current_group = [event]
+                current_end = end_dt
+    if current_group and len(current_group) > 1:
+        groups.append(current_group)
+    return groups
 
-# -------------------- Calendar Sync --------------------
 def sync_calendar():
     init_db()
+    init_attendee_db()
     token = get_token(SYNC_SCOPES)
     headers = {
         "Authorization": f"Bearer {token}",
         "Prefer": 'outlook.timezone="Pacific Standard Time"'
     }
-    
     if os.path.exists(DELTA_LINK_FILE):
         with open(DELTA_LINK_FILE, "r") as f:
             url = f.read().strip()
@@ -77,7 +91,7 @@ def sync_calendar():
             if should_ignore_event(event):
                 continue
             upsert_event(event)
-            # Update attendee database as needed (if using a parallel attendees database, call that function here)
+            update_attendee_db(event)
         if "@odata.nextLink" in data:
             url = data["@odata.nextLink"]
         elif "@odata.deltaLink" in data:
@@ -89,7 +103,6 @@ def sync_calendar():
         else:
             url = None
 
-# -------------------- Email Building --------------------
 def get_today_events():
     conn = sqlite3.connect(SQLITE_DB_FILE)
     cursor = conn.cursor()
@@ -120,40 +133,16 @@ def get_today_events():
     filtered.sort(key=lambda e: e["_start_pacific"])
     return filtered
 
-def get_conflict_groups(events):
-    groups = []
-    current_group = []
-    current_end = None
-    for event in events:
-        # Exclude all-day events from conflict detection.
-        if event.get("isAllDay", False):
-            continue
-        end_str = event.get("end", {}).get("dateTime")
-        if not end_str:
-            continue
-        try:
-            end_dt = parse_iso_time(end_str).astimezone(ZoneInfo("America/Los_Angeles"))
-        except Exception:
-            end_dt = event["_start_pacific"]
-        if not current_group:
-            current_group = [event]
-            current_end = end_dt
-        else:
-            if event["_start_pacific"] < current_end:
-                current_group.append(event)
-                if end_dt > current_end:
-                    current_end = end_dt
-            else:
-                if len(current_group) > 1:
-                    groups.append(current_group)
-                current_group = [event]
-                current_end = end_dt
-    if current_group and len(current_group) > 1:
-        groups.append(current_group)
-    return groups
+def format_time(dt):
+    """Return dt formatted in 12‑hour time using the appropriate format for the OS."""
+    import os
+    if os.name != 'nt':
+        return dt.strftime("%-I:%M %p")
+    else:
+        return dt.strftime("%#I:%M %p")
 
 def build_html_email(events):
-    # First, compute overall attendee frequency for today's events.
+    # Compute overall attendee frequency.
     freq_dict = {}
     for event in events:
         for att in event.get("attendees", []):
@@ -167,11 +156,9 @@ def build_html_email(events):
     html += "<tr><th>Time</th><th>Location</th><th>Subject</th><th>Status</th><th>Attendees</th></tr>"
     
     for event in events:
-        # Get start and end times.
         start = event.get("start", {}).get("dateTime", "TBD")
         end = event.get("end", {}).get("dateTime", "TBD")
         
-        # Determine subject.
         subject = event.get("subject", "").strip()
         if not subject:
             if event.get("seriesMasterId"):
@@ -184,7 +171,6 @@ def build_html_email(events):
             else:
                 subject = "(No Subject)"
         
-        # Process location.
         location = event.get("location", {}).get("displayName", "")
         loc_lower = location.lower()
         if "zoom" in loc_lower:
@@ -196,22 +182,17 @@ def build_html_email(events):
         elif "webex" in loc_lower:
             location = "Webex"
         
-        # Format time range.
         formatted_start = convert_to_pacific(start) if start != "TBD" else "TBD"
         formatted_end = convert_to_pacific(end) if end != "TBD" else "TBD"
         time_range = f"{formatted_start} - {formatted_end}" if formatted_start != "TBD" and formatted_end != "TBD" else "TBD"
         
-        # Determine status.
         response_status = event.get("responseStatus", {}).get("response", "").strip()
-        # Check if Paul's individual attendee record exists.
         for att in event.get("attendees", []):
             if att.get("emailAddress", {}).get("address", "").lower() == "paul@teamcinder.com":
-                # If there is a status field for Paul's attendee record, use it.
                 paul_status = att.get("status", {}).get("response", "").strip()
                 if paul_status:
                     response_status = paul_status
                 break
-        # Map the status.
         if response_status == "tentativelyAccepted":
             status_label = "Tentative"
         elif response_status in ["notResponded", "none", ""]:
@@ -223,16 +204,13 @@ def build_html_email(events):
         else:
             status_label = response_status
         
-        # Process attendees: remove Paul from the list.
         attendees_list = event.get("attendees", [])
-        # If the attendee list is empty and it's a recurring event, try the series master attendees.
+        # For recurring events with no attendees, try master attendees.
         if not attendees_list and event.get("seriesMasterId"):
             attendees_list = get_series_master_attendees(event.get("seriesMasterId"))
-        
         att_tuples = []
         for att in attendees_list:
             email = att.get("emailAddress", {}).get("address", "").lower()
-            # Skip Paul.
             if email == "paul@teamcinder.com":
                 continue
             name = att.get("emailAddress", {}).get("name", "").strip()
@@ -240,7 +218,6 @@ def build_html_email(events):
                 count = freq_dict.get(email, 0)
                 att_tuples.append((count, name, email))
         if len(att_tuples) > 4:
-            # Sort by frequency descending, then name ascending.
             att_tuples.sort(key=lambda t: (-t[0], t[1].lower()))
             top_attendees = [t[1] for t in att_tuples[:4]]
             attendees_names = ", ".join(top_attendees) + ", and others"
@@ -252,7 +229,6 @@ def build_html_email(events):
                 f"<td>{status_label}</td><td>{attendees_names}</td></tr>"
     html += "</table>"
     
-    # Build the conflict table.
     conflict_groups = get_conflict_groups(events)
     if conflict_groups:
         html += "<h2>Meeting Conflicts</h2>"
@@ -270,7 +246,7 @@ def build_html_email(events):
                 group_ends.append(end_dt)
             slot_start = min(group_starts)
             slot_end = max(group_ends)
-            time_slot = f"{slot_start.strftime('%-I:%M %p')} - {slot_end.strftime('%-I:%M %p')}"
+            time_slot = f"{format_time(slot_start)} - {format_time(slot_end)}"
             meetings_details_list = []
             for e in group:
                 subj = e.get("subject", "").strip()
@@ -284,7 +260,6 @@ def build_html_email(events):
             html += f"<tr><td>{time_slot}</td><td>{meetings_details}</td></tr>"
         html += "</table>"
     
-    # Build the attendee summary table.
     from attendees import get_attendee_summary
     attendee_summary = get_attendee_summary()
     if attendee_summary:
@@ -304,9 +279,33 @@ def build_html_email(events):
             html += f"<tr><td>{name}</td><td>{email}</td><td>{last_meeting_fmt}</td><td>{next_meeting_fmt}</td><td>{last_meeting_subject}</td></tr>"
         html += "</table>"
     
+    # Build stale contacts list: 5 contacts not met in the longest time.
+    summary = get_attendee_summary()
+    stale_list = []
+    for row in summary:
+        email, name, last_meeting, next_meeting, last_meeting_subject = row
+        if last_meeting:
+            try:
+                dt = datetime.fromisoformat(last_meeting)
+                stale_list.append((dt, name, email))
+            except Exception:
+                continue
+    stale_list.sort(key=lambda x: x[0])
+    stale_list = stale_list[:5]
+    if stale_list:
+        html += "<h2>Stale Contacts List</h2>"
+        html += "<table border='1' cellspacing='0' cellpadding='5'>"
+        html += "<tr><th>Name</th><th>Email</th><th>Last Meeting</th></tr>"
+        for dt, name, email in stale_list:
+            try:
+                last_meeting_fmt = dt.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%-m/%-d/%Y %-I:%M %p")
+            except Exception:
+                last_meeting_fmt = dt.isoformat()
+            html += f"<tr><td>{name}</td><td>{email}</td><td>{last_meeting_fmt}</td></tr>"
+        html += "</table>"
+    
     html += "</body></html>"
     return html
-
 
 def send_email_via_graph(html_content):
     token = get_token(MAIL_SCOPES)

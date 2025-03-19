@@ -1,3 +1,4 @@
+import requests
 import sqlite3
 from config import ATTENDEE_DB_FILE
 
