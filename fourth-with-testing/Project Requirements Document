@@ -1,0 +1,98 @@
+Below is a formal requirements document that outlines the project’s purpose, functionality, and key problem areas that have been addressed. This document is intended to guide future developers when maintaining or extending the system.
+
+---
+
+# Project Requirements Document
+
+## 1. Overview
+
+The project is an event synchronization and scheduling system designed to integrate with Microsoft O365 (and potentially other sources such as Gmail in the future). Its core functions are to:
+
+- **Sync calendar events:** Retrieve events from an O365 calendar using Microsoft Graph API, store events in a SQLite database, and maintain incremental sync via delta tokens.
+- **Generate email summaries:** Compose an HTML email that summarizes the day’s meetings, displays a top-five attendee summary (based on frequency of meetings), and shows a stale contacts list.
+- **Display a web-based schedule:** Render a dynamic webpage with a date picker, a detailed schedule for the selected date, a list of open time slots (e.g., "open happy hours"), an attendee summary, and a stale contacts list that includes interactive elements.
+
+## 2. Functional Requirements
+
+### 2.1 Event Sync & Database
+
+- **Data Sources:** The system uses Microsoft Graph API (O365) to retrieve calendar events.
+- **Databases:**
+  - **Events Database:** Stores event details including ID, subject, start and end times, location, attendees, and the raw JSON payload.
+  - **Attendees Database:** Tracks individual attendee information with fields for email, name, first meeting, last meeting, next meeting, last meeting subject, times met, ok_to_ignore flag, and a source identifier.
+- **Delta Sync:** A delta link (stored in a file) is used to maintain incremental updates, reducing redundant data retrieval.
+- **Schema Updates:** When the schema changes (e.g., the addition of the “source” column), the system must be initialized (using a dedicated initialize command) to drop and recreate databases with the new schema.
+
+### 2.2 Email Summary Generation
+
+- **HTML Email Construction:** Generates an HTML email containing:
+  - A table of today’s meetings with details (time, location, subject).
+  - A summary table of the top five most–contacted attendees.
+  - A stale contacts list (top 10 by oldest last meeting) that excludes attendees marked “ok to ignore.”
+- **Platform Considerations:** Time formatting is managed cross‑platform (using a common format like `%I:%M %p` and then stripping any leading zeros) to avoid platform-specific errors (such as those seen on Windows).
+
+### 2.3 Web-Based Schedule Display
+
+- **Dynamic Schedule Page:** The webpage includes:
+  - A date picker that lets the user select a specific date.
+  - A schedule table for the selected date, including events that span multiple days.
+  - An “Open Happy Hours” section that lists weekday dates over the next three weeks that have no events scheduled between 4–6 PM.
+- **Attendee Summary for Web:** Only the top five most-contacted attendees are displayed.
+- **Stale Contacts with Interaction:** The stale contacts table includes an extra column with clickable “ok to ignore?” links. When clicked, these links invoke a new Flask route that updates the corresponding attendee record, marking them as “ok to ignore” so that they are excluded from the stale contacts list in future renderings.
+- **Separation of Concerns:** The email version and web version differ in that the email does not contain the clickable stale contact links.
+
+### 2.4 API & Integration
+
+- **Microsoft Graph API:** Used for authenticating (via MSAL), retrieving events, and sending emails.
+- **OAuth2 Flow:** Uses device flow for token acquisition, with a token cache file to minimize repeated authentications.
+- **Future Integration:** The design anticipates integration with additional data sources (e.g., Gmail) by using the “source” field for attendees. This field may later be used for UI elements such as color-coding based on the origin of data.
+
+## 3. Non-Functional Requirements
+
+### 3.1 Testing and Debugging
+
+- **Unit Testing:** Comprehensive tests exist for:
+  - Utility functions (e.g., date/time parsing and formatting).
+  - Database operations for attendees (including updates and multiple events).
+  - Schedule generation (ensuring the correct event is displayed for a given date, and free-day messages are correctly rendered).
+- **Test Environment Isolation:** Test files override configuration to use temporary databases. However, production mode should allow the initialize command to drop and recreate the databases when schema changes occur.
+- **Debug Programs:** Dedicated debug utilities (e.g., debug_config.py) are included to verify configuration and to diagnose schema issues.
+
+### 3.2 Error Handling
+
+- **Schema Migration:** The system is designed to drop and recreate databases on initialization if a schema change is detected (for example, the addition of the “source” field).
+- **Time Zone Conversions:** All datetime values are managed with explicit time zone information (using zoneinfo), ensuring that event times are accurately converted to Pacific Time.
+- **Graceful Degradation:** If an error occurs while building the schedule or email (e.g., during JSON parsing or formatting), a simple error message is displayed rather than crashing the application.
+
+## 4. Key Potential Problem Areas & Solutions
+
+- **Database Schema Consistency:**  
+  - *Problem:* If an old database file remains after schema changes, queries referencing new columns (e.g., “source”) will fail.  
+  - *Solution:* Provide an initialize routine (or migration script) that deletes the existing databases so that they are recreated with the updated schema.  
+- **Time Zone and Date Formatting:**  
+  - *Problem:* Platform-specific formatting (e.g., using `%-I` on Unix vs. `%#I` on Windows) can cause errors.  
+  - *Solution:* Use a universal formatting approach (e.g., `%I:%M %p` and then stripping leading zeros) to ensure consistency.
+- **Test Isolation vs. Production Code:**  
+  - *Problem:* Tests that override configuration may not always be respected by production modules if they’re imported before configuration overrides.  
+  - *Solution:* In test setup, force module reloads and explicitly initialize databases using test-specific configuration.
+- **Interactive Web Features:**  
+  - *Problem:* The stale contacts list on the web must allow dynamic updates (click “ok to ignore?”) while ensuring that the email version remains static.  
+  - *Solution:* Separate the logic for web rendering and email generation. Introduce a new Flask route to update attendee records, and conditionally render interactive elements only on the web version.
+- **Datetime String Comparison:**  
+  - *Problem:* Differences between ISO datetime strings (e.g., using “Z” vs “+00:00”) can cause false test failures.  
+  - *Solution:* Compare parsed datetime objects instead of raw strings in unit tests.
+
+## 5. Future Considerations
+
+- **Extensibility:**  
+  - The project is designed to integrate with multiple data sources in the future. Developers must maintain clear separation of concerns for each source (using the “source” field) and update UI elements (e.g., color-coding) accordingly.
+- **Migration Support:**  
+  - A future developer should consider implementing an automated migration system (similar to Alembic for SQLAlchemy) so that schema changes can be applied without manually dropping databases.
+- **Test Environment:**  
+  - Further improvements could include isolating the test environment entirely from production, using environment variables or a dedicated configuration file for testing.
+- **Error Logging:**  
+  - The project currently prints or logs errors (e.g., database or datetime parsing errors). Enhanced logging and monitoring might be integrated to improve production support.
+
+---
+
+This document should give future developers a solid understanding of the system’s requirements and the design decisions made to address previous problem areas. It also provides insight into where caution is needed—especially around database schema changes, timezone handling, and test isolation.
