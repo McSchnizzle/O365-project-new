@@ -1,0 +1,6 @@
+msal
+requests
+tzdata
+Flask
+pytz
+python-dateutil
